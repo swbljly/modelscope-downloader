@@ -1,0 +1,2 @@
+# modelscope-downloader
+modelscope
