@@ -1,0 +1,33 @@
+{
+  "scenario": "sys.stdout/stderr/stdin 与 __*__ 全部置为 None（模拟 windowed 双击启动）；已加载 pack/entry.py 安装标准流兜底",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "allow_patterns": [
+    "README.md"
+  ],
+  "python": "3.14.6",
+  "guard_installed": true,
+  "target_dir": "C:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-a-9084ee8i",
+  "exception": null,
+  "exception_type": "",
+  "traceback": "",
+  "verdict": "FIXED（同一链路，装兜底后正常下载）",
+  "returned": "C:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-a-9084ee8i",
+  "downloaded_files": [
+    {
+      "path": "C:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-a-9084ee8i\\README.md",
+      "size": 4917
+    }
+  ],
+  "logs": [
+    "已加载 modelscope SDK（版本 1.40.2）",
+    "包含规则：README.md",
+    "断点续传：SDK 会校验已存在文件并跳过 / 续传；中断后再次点击即可继续。",
+    "已启用 SDK 进度回调（字节级数值仍由目标目录实时统计提供）",
+    "下载策略：local_dir —— 文件将直接写入所选文件夹（推荐）",
+    "文件已直接下载到目标文件夹：C:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-a-9084ee8i",
+    "========================================================",
+    "下载完成：Qwen/Qwen2.5-0.5B-Instruct @ master",
+    "保存位置：C:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-a-9084ee8i",
+    "========================================================"
+  ]
+}

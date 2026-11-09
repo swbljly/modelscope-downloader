@@ -1,0 +1,24 @@
+{
+  "scenario": "sys.stdout/stderr/stdin 与 __*__ 全部置为 None（模拟 windowed 双击启动）；未安装兜底（修复前基线）",
+  "model": "Qwen/Qwen2.5-0.5B-Instruct",
+  "allow_patterns": [
+    "README.md"
+  ],
+  "python": "3.14.6",
+  "guard_installed": false,
+  "target_dir": "C:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-a-7fqzao77",
+  "exception": "DownloadError: 下载失败：'NoneType' object has no attribute 'write'",
+  "exception_type": "DownloadError",
+  "traceback": "Traceback (most recent call last):\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\ms_downloader_core.py\", line 1651, in download_model\n    result = _call_snapshot_download(func, kwargs, log)\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\ms_downloader_core.py\", line 1200, in _call_snapshot_download\n    return func(**trial)\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\modelscope\\hub\\snapshot_download.py\", line 93, in snapshot_download\n    return _compat_snapshot_download(\n        model_id=model_id,\n    ...<16 lines>...\n        progress_callbacks=progress_callbacks,\n    )\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\modelscope_hub\\compat\\snapshot_download.py\", line 118, in snapshot_download\n    result = api.download_repo(\n        effective_id,\n    ...<9 lines>...\n        progress_callbacks=progress_callbacks,\n    )\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\modelscope_hub\\api.py\", line 2508, in download_repo\n    return self.downloader.download_repo(\n           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^\n        repo_id=repo_id,\n        ^^^^^^^^^^^^^^^^\n    ...<10 lines>...\n        file_list=file_list,\n        ^^^^^^^^^^^^^^^^^^^^\n    )\n    ^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\modelscope_hub\\_download.py\", line 1303, in download_repo\n    with tqdm(total=len(download_items), desc=\"Downloading\", unit=\"file\") as pbar:\n         ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\tqdm\\asyncio.py\", line 24, in __init__\n    super().__init__(iterable, *args, **kwargs)\n    ~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 1103, in __init__\n    self.refresh(lock_args=self.lock_args)\n    ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 1354, in refresh\n    self.display()\n    ~~~~~~~~~~~~^^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 1502, in display\n    self.sp(self.__str__() if msg is None else msg)\n    ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 457, in print_status\n    fp_write('\\r' + s + (' ' * max(last_len[0] - len_s, 0)))\n    ~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\tqdm\\std.py\", line 450, in fp_write\n    fp.write(str(s))\n    ^^^^^^^^\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Lib\\site-packages\\tqdm\\utils.py\", line 123, in __getattr__\n    return getattr(self._wrapped, name)\nAttributeError: 'NoneType' object has no attribute 'write'\n\nThe above exception was the direct cause of the following exception:\n\nTraceback (most recent call last):\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\repro_bug_a.py\", line 76, in main\n    returned = core.download_model(\n        model_id=\"Qwen/Qwen2.5-0.5B-Instruct\",\n    ...<7 lines>...\n        apply_env=False,\n    )\n  File \"E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\ms_downloader_core.py\", line 1752, in download_model\n    raise DownloadError(\"下载失败：{0}\".format(exc)) from exc\nms_downloader_core.DownloadError: 下载失败：'NoneType' object has no attribute 'write'\n",
+  "verdict": "REPRODUCED（修复前基线）",
+  "returned": "",
+  "downloaded_files": [],
+  "logs": [
+    "已加载 modelscope SDK（版本 1.40.2）",
+    "包含规则：README.md",
+    "断点续传：SDK 会校验已存在文件并跳过 / 续传；中断后再次点击即可继续。",
+    "已启用 SDK 进度回调（字节级数值仍由目标目录实时统计提供）",
+    "下载策略：local_dir —— 文件将直接写入所选文件夹（推荐）",
+    "下载失败：AttributeError: 'NoneType' object has no attribute 'write'"
+  ]
+}

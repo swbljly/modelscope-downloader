@@ -1,0 +1,42 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.venv/
+venv/
+
+# ---- 隔离打包环境（约 182 MB，绝不入库）----
+pack/.venv/
+
+# ---- PyInstaller 构建中间产物 ----
+pack/build/
+pack/dist/
+*.toc
+*.pyz
+*.pkg
+
+# ---- 二进制交付物：32.7 MB 的 exe 走 GitHub Release，不入库 ----
+dist/*.exe
+*.exe
+
+# ---- build.py 运行时生成的图标（纯标准库绘制，可随时重建）----
+pack/app.ico
+
+# ---- 运行时自检报告 / 崩溃日志 ----
+*.log
+自检结果.*
+下载自检结果.*
+进度回调自检结果.*
+取消自检结果.*
+启动错误.log
+
+# ---- 临时 / 备份 / 编辑器 / 本地工作区数据 ----
+*.tmp
+*.prev
+*.bak
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.workbuddy/

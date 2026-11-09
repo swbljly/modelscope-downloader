@@ -1,0 +1,29 @@
+{
+  "pythonw": "E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\pack\\.venv\\Scripts\\pythonw.exe",
+  "cases": {
+    "popen_devnull": {
+      "stdout_none": false,
+      "stderr_none": false,
+      "stdin_none": false,
+      "stdout_type": "TextIOWrapper",
+      "stderr_type": "TextIOWrapper",
+      "stdin_type": "TextIOWrapper",
+      "dunder_stdout_none": false,
+      "dunder_stderr_none": false,
+      "dunder_stdin_none": false,
+      "returncode": 0
+    },
+    "detached_no_handles": {
+      "stdout_none": true,
+      "stderr_none": true,
+      "stdin_none": true,
+      "stdout_type": "NoneType",
+      "stderr_type": "NoneType",
+      "stdin_type": "NoneType",
+      "dunder_stdout_none": true,
+      "dunder_stderr_none": true,
+      "dunder_stdin_none": true,
+      "returncode": 0
+    }
+  }
+}

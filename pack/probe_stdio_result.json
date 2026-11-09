@@ -1,0 +1,15 @@
+{
+  "exe": "E:\\WorkBuddy\\2026-11-08-18-00-47\\modelscope-downloader\\dist\\ModelScope下载器.exe",
+  "cases": {
+    "popen_devnull": {
+      "returncode": 0,
+      "crash_log": "",
+      "stdout_is_None": false
+    },
+    "detached_no_handles": {
+      "returncode": 0,
+      "crash_log": "",
+      "stdout_is_None": false
+    }
+  }
+}

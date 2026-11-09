@@ -1,0 +1,10 @@
+# ModelScope 模型下载器运行依赖（Python 3.8+ / Windows）
+# 安装命令：pip install -r requirements.txt
+#
+# modelscope 提供 snapshot_download 与 HubApi，是下载功能的核心依赖。
+# 1.18.0 起普遍支持 local_dir；若本机版本过低，程序会自动探测并回退到
+# cache_dir + 同步复制，同时在日志中明确提示（建议升级到较新版本）。
+modelscope>=1.18.0
+# modelscope SDK 内部使用的 HTTP 库；文件清单的 REST 兜底路径使用标准库
+# urllib，因此即使未装 requests，清单预览依然可用。
+requests>=2.25.0
