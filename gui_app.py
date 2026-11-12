@@ -46,9 +46,11 @@ _HINT_WORKERS = "并发下载线程数，默认 4。网络较好可适度调大�
 _HINT_SUBDIR = "便捷输入：只下载某个子目录，例如 onnx 或 onnx/q4 ，等价于自动追加 onnx/* 规则。"
 _HINT_ALLOW = "包含规则，多个用逗号分隔，例如 *.safetensors, *.json 或 onnx/* 。留空表示下载全部文件。"
 _HINT_IGNORE = "排除规则，多个用逗号分隔，例如 *.md, *.txt, *.png 。与包含规则同时生效时排除优先。"
-_HINT_SELECTED = "勾选后，仅下载下方文件清单中被勾选的文件（需先点【查看文件清单】）。"
-_HINT_TREE = "单击「选择」列或按空格键可勾选 / 取消；勾选配合「仅下载勾选文件」使用。"
+_HINT_SELECTED = "勾选即下载范围：清单里勾了哪几个文件就只下哪几个，不需要额外开关。"
+_HINT_TREE = "单击行的任意位置（或选中后按空格键）即可勾选 / 取消；勾选的这些文件就是本次下载范围。"
 _HINT_DEFAULT = "将鼠标移到输入框上可在此查看该字段的说明。"
+#: 尚未获取文件清单时的「下载范围」提示。
+_SCOPE_IDLE = "下载范围：点【查看文件清单】后，清单里勾选的文件就是本次下载范围"
 
 
 class DownloaderApp:
@@ -110,7 +112,12 @@ class DownloaderApp:
         self.var_subdir = tk.StringVar()
         self.var_allow = tk.StringVar()
         self.var_ignore = tk.StringVar()
-        self.var_only_selected = tk.BooleanVar(value=False)
+        # 兼容字段（不再是界面开关）：早期版本用它决定「清单勾选是否生效」，
+        # 默认关闭 → 用户只勾 1 个文件却下载整模型（Bug：勾选未生效）。
+        # 现在「勾选即下载范围」已固化，变量恒为 True，仅用于兼容旧配置文件
+        # 的读写（旧配置里的 false 会被忽略并自动迁移为 true）。
+        self.var_only_selected = tk.BooleanVar(value=True)
+        self.var_scope = tk.StringVar(value=_SCOPE_IDLE)
         self.var_hint = tk.StringVar(value=_HINT_DEFAULT)
         self.var_status = tk.StringVar(value="就绪")
         self.var_elapsed = tk.StringVar(value="已用时 00:00")
@@ -218,10 +225,15 @@ class DownloaderApp:
         self.btn_stop.pack(side=tk.LEFT)
 
         ttk.Label(
+            parent, textvariable=self.var_scope, style="Summary.TLabel",
+            wraplength=430, justify=tk.LEFT,
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(10, 0))
+
+        ttk.Label(
             parent,
             text="下载中断后再次点击【开始下载】即可续传，已完成文件自动跳过。",
             style="Sub.TLabel", wraplength=430,
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
     def _build_advanced_frame(self, parent: ttk.LabelFrame) -> None:
         """构建「高级设置」区：所有可选项都带合理默认值。"""
@@ -256,13 +268,15 @@ class DownloaderApp:
         )
         row_index += 1
 
-        check = ttk.Checkbutton(
-            parent, text="仅下载文件清单中勾选的文件",
-            variable=self.var_only_selected,
+        # 早期版本这里是一个「仅下载文件清单中勾选的文件」复选框，默认关闭，
+        # 导致用户勾了文件却下载整模型。现在勾选本身就是下载范围，开关已移除，
+        # 只用一行说明把语义讲清楚，避免用户继续找「另一个开关」。
+        scope_note = ttk.Label(
+            parent, text=_HINT_SELECTED, style="Sub.TLabel",
+            wraplength=440, justify=tk.LEFT,
         )
-        check.grid(row=row_index, column=0, columnspan=3, sticky="w", pady=(6, 2))
-        self._bind_hint(check, _HINT_SELECTED)
-        self._editable.append(check)
+        scope_note.grid(row=row_index, column=0, columnspan=3, sticky="w", pady=(6, 2))
+        self._bind_hint(scope_note, _HINT_SELECTED)
         row_index += 1
 
         hint_label = ttk.Label(
@@ -552,7 +566,9 @@ class DownloaderApp:
         self.var_subdir.set(config.subdir)
         self.var_allow.set(config.allow_patterns)
         self.var_ignore.set(config.ignore_patterns)
-        self.var_only_selected.set(bool(config.only_selected))
+        # 勾选即范围：旧配置里的 only_selected=false 不再生效，统一升级为 True，
+        # 下次保存配置时会写回 true（自动迁移，且旧配置文件不会崩）。
+        self.var_only_selected.set(True)
 
     def _collect_config(self) -> core.AppConfig:
         """从界面收集配置并持久化。"""
@@ -621,15 +637,48 @@ class DownloaderApp:
         values[0] = UNCHECKED if values[0] == CHECKED else CHECKED
         self.tree.item(iid, values=values)
 
+    def _refresh_scope(self) -> None:
+        """根据当前勾选刷新「下载范围」提示，让范围对用户始终可见。
+
+        勾选数量 / 字节数直接由 Treeview 计算，与真正传给 SDK 的规则同源，
+        避免界面显示与实际下载范围不一致。
+        """
+        info = self._model_info
+        if info is None or not info.files:
+            self.var_scope.set(_SCOPE_IDLE)
+            return
+        sizes = {item.path: item.size for item in info.files}
+        total_count = len(info.files)
+        picked = self._selected_paths()
+        picked_bytes = sum(int(sizes.get(path, 0)) for path in picked)
+        if not picked:
+            self.var_scope.set(
+                "下载范围：未勾选任何文件（清单共 {0} 个）—— 点【开始下载】会被拦下".format(
+                    total_count))
+        elif len(picked) >= total_count:
+            self.var_scope.set("下载范围：全部 {0} 个文件 · 合计 {1}".format(
+                total_count, core.format_size(info.total_size)))
+        else:
+            self.var_scope.set("下载范围：勾选的 {0}/{1} 个文件 · 合计 {2}".format(
+                len(picked), total_count, core.format_size(picked_bytes)))
+
     def _on_tree_click(self, event: tk.Event) -> Optional[str]:
-        """点击「选择」列时切换勾选。"""
+        """单击清单行的**任意位置**都切换勾选。
+
+        旧版只在第 1 列（「选择」列）切换勾选：用户单击「文件路径」列时
+        Treeview 只是把该行高亮，看起来很像「已经选好了」，实际每一行仍是
+        ☑ 全选状态，最终下载了整个模型 —— 这正是用户报告的 Bug。现在任意列
+        单击都会翻转 ☑/☐，勾选状态与下载范围始终一一对应。
+        """
         if self.tree.identify_region(event.x, event.y) != "cell":
             return None
-        if self.tree.identify_column(event.x) != "#1":
-            return None
         iid = self.tree.identify_row(event.y)
-        if iid:
-            self._toggle_row(iid)
+        if not iid:
+            return None
+        self._toggle_row(iid)
+        self._refresh_scope()
+        if self.tree.identify_column(event.x) == "#1":
+            # 「选择」列不再产生行高亮：☑/☐ 是唯一的勾选信号，杜绝「高亮≠勾选」。
             return "break"
         return None
 
@@ -637,6 +686,7 @@ class DownloaderApp:
         """空格键切换当前选中行的勾选状态。"""
         for iid in self.tree.selection():
             self._toggle_row(iid)
+        self._refresh_scope()
         return "break"
 
     def _select_all(self, checked: bool) -> None:
@@ -646,11 +696,13 @@ class DownloaderApp:
             values = list(self.tree.item(iid, "values"))
             values[0] = mark
             self.tree.item(iid, values=values)
+        self._refresh_scope()
 
     def _invert_selection(self) -> None:
         """反选所有行。"""
         for iid in self.tree.get_children():
             self._toggle_row(iid)
+        self._refresh_scope()
 
     def _show_model_info(self, info: core.ModelInfo) -> None:
         """在主线程中把文件清单填入 Treeview。"""
@@ -670,6 +722,7 @@ class DownloaderApp:
         source = "ModelScope SDK" if info.source == "SDK" else "公开 REST 接口"
         self.var_summary.set("共 {0} 个文件   ·   合计 {1}   ·   来源：{2}".format(
             info.file_count, core.format_size(info.total_size), source))
+        self._refresh_scope()
 
     def _start_preview(self) -> None:
         """启动后台线程查询文件清单。"""
@@ -720,41 +773,53 @@ class DownloaderApp:
     # ------------------------------------------------------------------
 
     def _start_download(self) -> None:
-        """启动后台线程下载模型。"""
+        """启动后台线程下载模型。
+
+        下载范围由 :func:`core.plan_download_scope` 统一裁决（优先级见该函数
+        文档与 README）：清单部分勾选 → 只下勾选的文件；全部勾选 → 下载全部；
+        一个都没勾 → 中止并提示；未获取清单 → 下载全部但日志明确写出。
+        """
         if not core.sdk_is_installed():
             self._show_install_guide()
             return
         config = self._prepare()
         if config is None:
             return
-        allow, ignore = core.resolve_patterns(
-            config.allow_patterns, config.ignore_patterns, config.subdir
+        scope = core.plan_download_scope(
+            allow_raw=config.allow_patterns,
+            ignore_raw=config.ignore_patterns,
+            subdir=config.subdir,
+            listing=self._model_info,
+            selected_paths=self._selected_paths(),
+            model_id=config.model_id,
+            revision=config.revision,
         )
-        if config.only_selected:
-            paths = self._selected_paths()
-            if not paths:
-                messagebox.showinfo(
-                    "提示",
-                    "请先在文件清单中勾选要下载的文件，或关闭【仅下载文件清单中勾选的文件】。",
-                )
-                return
-            for path in paths:
-                if path not in allow:
-                    allow.append(path)
-            self._log("仅下载勾选的 {0} 个文件".format(len(paths)))
-
-        total = 0
-        if self._model_info is not None and self._model_info.model_id == config.model_id:
-            total = self._model_info.total_size
+        if scope.is_blocked:
+            for note in scope.notes:
+                self._log(note)
+            self._log("已中止：清单里一个文件都没勾选，不会下载任何文件。")
+            messagebox.showinfo(
+                "请先勾选文件",
+                "文件清单里一个文件都没有勾选，已中止下载。\n\n"
+                "· 只想下几个文件：在下方清单里单击要下载的行（出现 ☑ 即已选中）；\n"
+                "· 想下全部文件：点【全选】后再点【开始下载】。\n\n"
+                "程序不会再「一个都没勾就静默下载整个模型」。",
+            )
+            return
 
         self._set_busy(True)
+        total = scope.total_bytes
         self._reset_progress(total)
         self._log("=" * 56)
         self._log("开始下载：{0} @ {1} -> {2}".format(
             config.model_id, config.revision, config.target_dir))
+        # 需求：下载范围必须一眼可见（N/M 个文件 + 合计大小）。
+        self._log(scope.describe())
+        for note in scope.notes:
+            self._log(note)
         self._worker = threading.Thread(
             target=self._download_worker,
-            args=(config, allow, ignore, total),
+            args=(config, scope.allow_patterns, scope.ignore_patterns, total),
             name="ms-download", daemon=True,
         )
         self._worker.start()

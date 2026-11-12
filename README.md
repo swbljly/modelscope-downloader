@@ -88,9 +88,9 @@ Python 自带 `tkinter`，绝大多数官方安装包已包含；若启动时提
 | 仅下载子目录 | — | 便捷输入，如 `onnx` 或 `onnx/q4`，自动展开为 `onnx/*`、`onnx/**` | 空 |
 | 包含规则 | — | `allow_patterns`，多个用逗号分隔，如 `*.safetensors, *.json` | 空＝全部 |
 | 排除规则 | — | `ignore_patterns`，多个用逗号分隔，如 `*.md, *.txt, *.png` | 空 |
-| 仅下载文件清单中勾选的文件 | — | 勾选后只下载 Treeview 中打勾的文件 | 关闭 |
-| 文件清单 Treeview | — | 单击「选择」列或选中后按空格切换勾选；可全选 / 全不选 / 反选 | 默认全勾选 |
-| 进度条 + 日志区 | — | 百分比 / 字节数、带时间戳的滚动日志 | — |
+| 文件清单 Treeview（**勾选即下载范围**） | — | **清单里勾了哪几个文件，就只下载哪几个**，不需要任何额外开关；单击行内任意位置（或选中后按空格）即可切换 ☑/☐；工具栏提供全选 / 全不选 / 反选 | 默认全勾选＝下载全部 |
+| 下载范围提示 | — | 位于【开始下载】下方，随勾选实时更新；点【开始下载】时日志还会再写一遍「本次下载 N/M 个文件，合计 X」 | — |
+| 进度条 + 日志区 | — | 百分比 / 字节数、带时间戳的滚动日志；只下勾选文件时，百分比的分母是**勾选文件的字节数之和** | — |
 
 所有「高级设置」里的配置都会在退出程序时自动保存到
 `%APPDATA%\ModelScopeDownloader\config.json`，下次启动自动回填；配置文件损坏时会自动回退默认值，不会导致程序崩溃。
@@ -113,7 +113,8 @@ Python 自带 `tkinter`，绝大多数官方安装包已包含；若启动时提
 | 目标 | 做法 |
 | --- | --- |
 | 只下 GGUF | 模型名填 `qwen/Qwen2.5-7B-Instruct-GGUF`，「包含规则」填 `*.gguf` |
-| 只下某个量化 | 先点【查看文件清单】，在清单里勾选需要的那个 `.gguf`，勾上「仅下载文件清单中勾选的文件」 |
+| 只下某个量化 | 先点【查看文件清单】，在清单里**勾选**需要的那个 `.gguf` 即可（勾选即范围，不用再勾别的开关） |
+| 只下几个零散文件 | 先点【查看文件清单】，逐个勾选需要的文件；一个都不勾会被立即拦下，不会误下整模型 |
 | 只下权重和配置 | 「包含规则」填 `*.safetensors, config.json, tokenizer*` |
 | 只下某个子目录 | 「仅下载子目录」填 `onnx`（会自动变成 `onnx/*`） |
 | 排除文档和图片 | 「排除规则」填 `*.md, *.png, *.jpg, *.txt` |
@@ -165,6 +166,42 @@ pip install -U modelscope
 
 这是旧版 exe 的已知缺陷：PyInstaller `--windowed` 由资源管理器双击启动时，`sys.stdout` / `sys.stderr`（含 `sys.__stderr__` 等）全为 `None`，`tqdm` 首次刷新进度条时会写 `None.write` 而崩溃。`pack/entry.py` 现在会在导入 modelscope / tkinter **之前**把六个标准流统一换成指向 `os.devnull` 的安全 `TextIOWrapper`。请改用新构建的 `dist/ModelScope下载器.exe` 覆盖旧文件。
 
+### 9. 我只勾了 1 个文件，为什么把整个模型都下载了？（已修复）
+
+这是旧版的行为缺陷，根因有两处叠加：
+
+1. 「仅下载文件清单中勾选的文件」这个复选框**默认关闭**，只有勾上它，清单的勾选结果才会被转成 SDK 的 `allow_patterns`；不勾时传给 SDK 的 `allow_patterns` 是空列表，而 SDK 的语义是「空 = 下载全部文件」。
+2. 勾选只能点第 1 列（「选择」列）。单击「文件路径」列时 Treeview 只是把该行**高亮**，勾选状态并没有变化 —— 看起来像「已经选好了」，其实每一行仍是 ☑。
+
+现在的行为（**勾选即下载范围**，不需要任何额外开关）：
+
+- **清单里勾了 N 个（N < 总数）** → 只下载这 N 个文件；日志写「本次下载 N/M 个文件，合计 X」，进度条分母也是这 N 个文件的字节数之和。
+- **全部勾选** → 等价于下载全部，与旧版一致。
+- **一个都不勾** → 不会静默下载整模型，而是弹窗提示并中止。
+- **没点过【查看文件清单】** → 无法按勾选过滤，会下载全部文件，但日志会明确写出「未获取清单，本次下载全部文件」。
+- **单击行内任意位置**都能切换 ☑/☐（不再只有「选择」列），下方的「下载范围」提示实时显示「勾选的 N/M 个文件 · 合计 X」。
+
+规则优先级（与手填规则冲突时以谁为准）：
+
+1. **勾选优先**：有清单且只勾选部分文件时，下载范围**只由勾选决定**；此时手填的「包含规则 / 仅下载子目录」被忽略（日志会明说），避免勾了 A 却因为一条 `*.safetensors` 把同类文件一起拉下来。
+2. **排除规则永远优先**：即使文件被勾选，只要命中「排除规则」就不会下载（与旧版语义一致，日志会提示该规则仍在生效）。
+3. **全部勾选时退回旧行为**：手填的包含 / 排除 / 子目录规则照常生效，「只填规则下载」的老习惯不受影响。
+4. **清单与当前模型 / 版本不匹配**（改了模型名或版本却没重新查清单）：视为「未获取清单」，下载全部并写日志提示重新点【查看文件清单】。
+
+实现细节：勾选的文件路径会经 `escape_glob_pattern()` 转义成只匹配自身的模式再交给 SDK（SDK 用 `fnmatch` 匹配，文件名里的 `[` `]` `*` `?` 若原样传入会被当成通配符，既可能匹配不到自己，也可能误匹配兄弟文件）。裁决逻辑集中在 `ms_downloader_core.plan_download_scope()`，可脱离界面单测。
+
+可复核的证据与自检入口：
+
+```bat
+REM 修复前后 A/B：只勾 1 个文件时，传给 SDK 的 allow_patterns 实际值
+pack\.venv\Scripts\python.exe pack\repro_select_bug.py --tag after
+
+REM 端到端验收：无标准句柄（等价双击）启动新 exe，真实只下 1 个小文件
+pack\.venv\Scripts\python.exe pack\verify_select.py
+```
+
+`pack/verify_select.py` 以「无标准句柄」方式启动 exe 的 `--smoke-select`，在 exe 内用真实 GUI 走完「查清单 → 全不选被拦 → 全选等于全部 → 未获取清单写日志 → 只勾 `README.md` 真实下载」，并断言目标文件夹里**只有** `README.md`、进度分母等于 4917 字节（而不是整模型 953 MB）。
+
 ---
 
 ## 七、文件清单
@@ -184,10 +221,12 @@ pip install -U modelscope
 | --- | --- |
 | `dist/ModelScope下载器.exe` | 交付成品：PyInstaller 6.21.0，onefile + windowed |
 | `dist/使用说明.txt` | 单文件版使用说明 |
-| `pack/entry.py` | exe 入口：windowed 标准流兜底、`--self-check` / `--smoke-download` / `--smoke-progress` / `--smoke-cancel` |
+| `pack/entry.py` | exe 入口：windowed 标准流兜底、`--self-check` / `--smoke-download` / `--smoke-progress` / `--smoke-cancel` / `--smoke-select` |
 | `pack/build.py` / `pack/downloader.spec` | 一键构建脚本与 PyInstaller 配置 |
 | `pack/verify_exe.py` | 基础验证（**注意**：它给子进程传了有效标准句柄，测不到双击场景） |
 | `pack/verify_bugfix.py` | BugFix 验收：以「无标准句柄（等价用户双击）」方式实测新 exe |
+| `pack/verify_select.py` | 「勾选即下载范围」端到端验收：无标准句柄启动 exe 的 `--smoke-select`，真实只下 1 个小文件并断言目录内容 |
+| `pack/repro_select_bug.py` | 勾选 Bug 的最小复现：驱动真实 GUI 勾选逻辑，抓出真正传给 SDK 的 `allow_patterns`（修复前为空 → 下载整模型） |
 | `pack/repro_bug_a.py` | Bug A 复现脚本：把标准流置 `None` 后走完整 GUI 下载链，支持 `--with-guard` 修复前后 A/B 对照 |
 | `pack/repro_smoke_exact.py` | 严格参数对照：完全复刻 `--smoke-download` 的调用参数，在标准流为 `None` 时同样复现崩溃，排除「小文件 / 单线程 / apply_env」等参数差异 |
 | `pack/probe_streams.py` / `pack/probe_stdio.py` | 标准流状态诊断（解释上一轮 smoke 为何漏测） |
@@ -198,6 +237,7 @@ pip install -U modelscope
 
 - **线程模型**：清单查询与下载均运行在 daemon 后台线程；后台线程**绝不直接触碰 Tcl**，只把界面任务放入线程安全 `queue.Queue`，由主线程的 `root.after` 定时泵（40ms）统一排空执行。这样避免了 tkinter 跨线程 `root.after` 抛 `RuntimeError: main thread is not in main loop` 导致日志 / 进度 / 文件清单被静默吞掉；`threading.Event` 负责取消；按钮状态机防止重复启动多个任务。点击停止时主线程立即排空一次队列，保证反馈即时可见。
 - **进度降级与取消注入**：优先尝试 SDK 的 `progress_callbacks`（兼容失败时静默放弃），字节级进度始终由目标目录定时扫描提供；该回调同时承担取消检查，是每个数据块中断 SDK 下载的唯一入口。总大小未知时切换 `indeterminate` 滚动模式，并配「已用时」计时器保证界面有活动反馈。
+- **下载范围裁决（`plan_download_scope`）**：把「清单勾选 + 包含规则 + 排除规则 + 子目录 + 清单是否过期」合并成一个纯函数式的 `DownloadScope`（`mode` / `allow_patterns` / `ignore_patterns` / `total_bytes` / `notes`），界面只负责展示与被拦下时提示。勾选文件路径经 `escape_glob_pattern()` 转义（`[`→`[[]`、`]`→`[]]`、`*`→`[*]`、`?`→`[?]`），保证 `model[1].onnx` 这类文件名在 SDK 的 `fnmatch` 语义下精确命中且不误匹配；进度分母改用勾选文件字节数之和。
 - **单文件 exe 标准流兜底**：`pack/entry.py` 在模块级最早处调用 `_install_stdio_guard()`，把 windowed 下为 `None` 的六个标准流换成 `os.devnull` 上的 `TextIOWrapper`（具备 `write` / `flush` / `isatty` / `fileno` 等完整接口）。源码模式（有真实控制台）三个流都有效时直接返回、不改动任何 `sys` 属性。
 - **配置持久化**：`%APPDATA%/ModelScopeDownloader/config.json`，原子写入（临时文件 + `os.replace`），读取异常一律回退默认值。
 - **异常分层**：`DownloaderError` → `ValidationError` / `DependencyError` / `RepoQueryError` / `DownloadError` / `DownloadCancelled`，界面按类型给出不同提示。
@@ -209,7 +249,9 @@ pip install -U modelscope
 
 - 源码版首次使用必须手动安装一次依赖（双击 `安装依赖.bat`）；单文件 exe 版不需要。
 - SDK 长时间无数据块到达时（网络等待），取消需等下一个数据块 / 网络超时才生效；正常传输中由进度回调在下一个数据块中断，通常是秒级。不会为了「看起来已停止」而伪造状态。
-- 「仅下载勾选文件」需要先点一次【查看文件清单】才有可勾选条目。
+- 「勾选即下载范围」需要先点一次【查看文件清单】才有可勾选条目；没查清单时按「下载全部」处理（日志会明确写出）。
+- 只下勾选文件时，进度条分母是勾选文件的字节数之和；若目标文件夹里**已经**存在之前下载的其它文件，扫描到的字节数会偏大（百分比会提前打满），这是「按目录统计字节」的固有特性，不影响文件正确性。
+- 文件名里含**英文逗号** `,` 时无法精确表达：SDK 会把每个规则按逗号切成多条（`modelscope_hub/utils/patterns.py` 的 `normalize_patterns`），程序会在日志中提示；这类文件请改用「包含规则」或直接下载全部。
 - 公开 REST 接口在极少数私有 / 需登录的仓库上可能返回空清单；这类仓库建议安装 SDK 后由 `HubApi` 查询。
 - 程序不会删除目标目录中已存在但已不在本次下载规则内的旧文件。
 - 首次查询文件清单时，本机 DNS / 系统代理解析偶尔会额外耗时数秒（实测 0.4~10 秒波动）；查询在后台线程进行，界面保持可响应，状态栏与「已用时」计时器会持续反馈，不会卡死。

@@ -1,0 +1,40 @@
+{
+  "tag": "before",
+  "python": "3.14.6",
+  "listing": [
+    {
+      "path": "README.md",
+      "size": 4917
+    },
+    {
+      "path": "config.json",
+      "size": 660
+    },
+    {
+      "path": ".gitattributes",
+      "size": 1519
+    },
+    {
+      "path": "model.safetensors",
+      "size": 988097824
+    }
+  ],
+  "selection": "只勾选 README.md（1/4）",
+  "checked_rows": [
+    "README.md"
+  ],
+  "only_selected_var": false,
+  "allow_patterns_sent_to_sdk": [],
+  "ignore_patterns_sent_to_sdk": [],
+  "total_bytes_sent_to_sdk": 988104920,
+  "model_total_bytes": 988104920,
+  "log": "[14:03:13] 程序已启动。填写「模型库名称」与「保存到文件夹」即可开始下载。\n[14:03:13] 提示：下载前可先点【查看文件清单】确认文件与总大小。\n[14:03:13] ========================================================\n[14:03:13] 开始下载：Qwen/Qwen2.5-0.5B-Instruct @ master -> C:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-select-nslc8163\\out\n[14:03:13] 下载任务已结束。\n\n",
+  "popups": [
+    {
+      "kind": "info",
+      "title": "下载完成",
+      "message": "模型已保存到：\nC:\\Users\\玄派\\AppData\\Local\\Temp\\msdl-repro-select-nslc8163\\out"
+    }
+  ],
+  "verdict": "BUG_REPRODUCED：allow_patterns 为空 → SDK 下载该模型全部文件"
+}

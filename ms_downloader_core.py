@@ -55,16 +55,21 @@ __all__ = [
     "AppConfig",
     "DownloadCancelled",
     "DownloadError",
+    "DownloadScope",
     "DownloaderError",
     "DependencyError",
     "ModelInfo",
     "RepoFile",
     "RepoQueryError",
+    "SCOPE_ALL",
+    "SCOPE_EMPTY",
+    "SCOPE_SELECTED",
     "ValidationError",
     "apply_environment",
     "build_download_kwargs",
     "dir_size_bytes",
     "download_model",
+    "escape_glob_pattern",
     "fetch_repo_files",
     "format_size",
     "get_config_path",
@@ -73,11 +78,13 @@ __all__ = [
     "load_config",
     "normalize_model_id",
     "parse_patterns",
+    "plan_download_scope",
     "probe_local_dir_support",
     "resolve_patterns",
     "save_config",
     "sdk_is_installed",
     "sdk_version",
+    "selection_to_allow_patterns",
     "sync_cache_to_target",
 ]
 
@@ -216,6 +223,13 @@ class AppConfig:
 
     所有字段均为界面可直接回填的简单类型；``load_config`` 在配置文件损坏时
     会返回全默认值的实例。
+
+    ``only_selected`` 的历史与现状：
+        * 早期版本用它决定「文件清单的勾选是否生效」，默认 ``False``，
+          导致用户只勾 1 个文件却下载整模型（Bug：清单勾选未生效）。
+        * 现在「勾选即下载范围」已固化为默认行为，界面不再暴露该开关。
+          字段仍保留读写（旧配置文件不会报错 / 不崩），但取值恒为 ``True``；
+          旧配置里的 ``False`` 会被忽略并在下次保存时自动迁移为 ``True``。
     """
 
     model_id: str = ""
@@ -227,7 +241,7 @@ class AppConfig:
     subdir: str = ""
     allow_patterns: str = ""
     ignore_patterns: str = ""
-    only_selected: bool = False
+    only_selected: bool = True
 
 
 _CONFIG_FIELDS: List[str] = [item.name for item in dataclasses.fields(AppConfig)]
@@ -431,6 +445,10 @@ def resolve_patterns(
         ignore_raw: 排除规则原始文本（逗号分隔）。
         subdir: 「仅下载某个子目录」便捷输入，例如 ``onnx`` 或 ``onnx/q4``。
         selected_paths: 文件清单中被勾选的文件路径，作为精确包含规则追加。
+            **注意**：本函数只做原样追加，不转义通配元字符；把勾选结果交给
+            SDK 时应使用 :func:`selection_to_allow_patterns`（或直接用
+            :func:`plan_download_scope`），否则 ``model[1].onnx`` 这类文件名
+            会被当成字符类而匹配失败。
 
     Returns:
         ``(allow_patterns, ignore_patterns)`` 二元组。
@@ -447,6 +465,266 @@ def resolve_patterns(
         if normalized and normalized not in allow:
             allow.append(normalized)
     return allow, ignore
+
+
+# ---------------------------------------------------------------------------
+# 下载范围：把「清单勾选」翻译成 SDK 的过滤规则
+# ---------------------------------------------------------------------------
+
+#: 下载范围的三种形态（:class:`DownloadScope` 的 ``mode`` 字段）。
+SCOPE_ALL: str = "all"
+SCOPE_SELECTED: str = "selected"
+SCOPE_EMPTY: str = "empty"
+
+#: ``fnmatch`` 的通配元字符 -> POSIX 字符类写法的转义映射。
+#: ``[`` -> ``[[]``、``]`` -> ``[]]``、``*`` -> ``[*]``、``?`` -> ``[?]``，
+#: 经 ``fnmatch.translate`` 后都只匹配字符本身（已实测验证）。
+_GLOB_ESCAPE_MAP: Dict[str, str] = {
+    "[": "[[]",
+    "]": "[]]",
+    "*": "[*]",
+    "?": "[?]",
+}
+
+
+def escape_glob_pattern(path: str) -> str:
+    """把仓库相对路径转成可被 ``fnmatch`` **精确**匹配的模式。
+
+    为什么需要转义：modelscope SDK 用 ``fnmatch.fnmatch(path, pattern)`` 匹配
+    ``allow_patterns``（见 ``modelscope_hub/_download.py::_matches_patterns``）。
+    文件名里的 ``[``、``]``、``*``、``?`` 是通配元字符，直接当精确路径传进去
+    会退化成字符类 / 通配符：既可能匹配不到文件本身（该下的没下），也可能
+    误匹配同目录下的其它文件（不该下的下了）。这里统一转义成只匹配自身的
+    字符类写法，保证「勾选哪个文件就精确匹配哪个文件」。
+
+    Args:
+        path: 仓库相对路径，例如 ``onnx/model.onnx`` 或 ``model[1].onnx``。
+
+    Returns:
+        转义后的模式；``path`` 为空时返回空字符串。
+    """
+    text = str(path or "").replace("\\", "/").strip().lstrip("/")
+    if text.startswith("./"):
+        text = text[2:]
+    return "".join(_GLOB_ESCAPE_MAP.get(char, char) for char in text)
+
+
+def selection_to_allow_patterns(
+    selected_paths: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """把清单勾选的文件路径转成 SDK 的精确包含规则。
+
+    处理顺序：去掉首尾空白与 ``./`` 前缀、统一 ``/`` 分隔符、转义通配元字符、
+    去重（保持清单顺序）。
+
+    Args:
+        selected_paths: 勾选的文件路径（``None`` / 非序列时按空处理）。
+
+    Returns:
+        可直接作为 ``snapshot_download(allow_patterns=...)`` 的列表。
+    """
+    result: List[str] = []
+    if not isinstance(selected_paths, (list, tuple, set, frozenset)):
+        return result
+    for raw in selected_paths:
+        pattern = escape_glob_pattern(str(raw or ""))
+        if pattern and pattern not in result:
+            result.append(pattern)
+    return result
+
+
+def _matching_listing(
+    listing: Optional[ModelInfo],
+    model_id: str = "",
+    revision: str = "",
+) -> Optional[ModelInfo]:
+    """判断文件清单是否仍然匹配当前输入。
+
+    清单可能是上一次查询的结果：用户若改了模型名 / 版本，旧清单的勾选结果
+    不能拿来当新模型的过滤条件（否则会把新模型下成旧清单的子集）。不匹配时
+    返回 ``None``，等价于「未获取清单」。
+
+    Args:
+        listing: 清单对象，可为 ``None``。
+        model_id: 当前输入的模型 ID。
+        revision: 当前输入的版本 / 分支。
+
+    Returns:
+        仍然可用的清单对象，或 ``None``。
+    """
+    if listing is None or not getattr(listing, "files", None):
+        return None
+    want_revision = str(revision or "").strip() or DEFAULT_REVISION
+    have_revision = str(getattr(listing, "revision", "") or "").strip() or DEFAULT_REVISION
+    if have_revision != want_revision:
+        return None
+    want_id = str(model_id or "").strip()
+    if want_id:
+        try:
+            want_id = normalize_model_id(want_id)
+        except ValidationError:
+            pass
+        have_id = str(getattr(listing, "model_id", "") or "").strip()
+        if have_id != want_id:
+            return None
+    return listing
+
+
+def _align_selection(
+    selected_paths: Optional[Sequence[str]],
+    listing_paths: Sequence[str],
+) -> List[str]:
+    """把界面勾选结果对齐到清单路径：丢弃未知项、去重、按清单顺序返回。"""
+    allowed = set(listing_paths)
+    picked = set()
+    if isinstance(selected_paths, (list, tuple, set, frozenset)):
+        for raw in selected_paths:
+            text = str(raw or "").strip().replace("\\", "/").lstrip("/")
+            if text.startswith("./"):
+                text = text[2:]
+            if text in allowed:
+                picked.add(text)
+    return [path for path in listing_paths if path in picked]
+
+
+@dataclass
+class DownloadScope:
+    """一次下载的最终范围，以及范围的来源说明。
+
+    Attributes:
+        mode: ``SCOPE_ALL`` / ``SCOPE_SELECTED`` / ``SCOPE_EMPTY``。
+        allow_patterns: 传给 SDK 的包含规则；空列表表示不加限制（下载全部）。
+        ignore_patterns: 传给 SDK 的排除规则（排除优先，始终生效）。
+        total_bytes: 进度条分母：勾选文件字节数之和；未知时为 0。
+        selected_count: 清单中勾选的文件数。
+        total_count: 清单中的文件总数；未获取清单时为 0。
+        notes: 需要写进日志的解释性说明（规则优先级、被忽略的输入等）。
+    """
+
+    mode: str = SCOPE_ALL
+    allow_patterns: List[str] = field(default_factory=list)
+    ignore_patterns: List[str] = field(default_factory=list)
+    total_bytes: int = 0
+    selected_count: int = 0
+    total_count: int = 0
+    notes: List[str] = field(default_factory=list)
+
+    @property
+    def is_blocked(self) -> bool:
+        """是否必须中止下载（清单存在但一个文件都没勾选）。"""
+        return self.mode == SCOPE_EMPTY
+
+    def describe(self) -> str:
+        """返回一句「本次下载范围」的可读描述，供日志与界面直接展示。"""
+        if self.mode == SCOPE_EMPTY:
+            return "未勾选任何文件，已中止（清单共 {0} 个文件）".format(
+                self.total_count)
+        if self.mode == SCOPE_SELECTED:
+            return "本次下载 {0}/{1} 个文件，合计 {2}".format(
+                self.selected_count, self.total_count,
+                format_size(self.total_bytes))
+        if self.total_count:
+            return "本次下载 {0}/{1} 个文件，合计 {2}".format(
+                self.selected_count, self.total_count,
+                format_size(self.total_bytes))
+        return "未获取清单，本次下载全部文件（文件数量与大小未知）"
+
+
+def plan_download_scope(
+    allow_raw: str = "",
+    ignore_raw: str = "",
+    subdir: str = "",
+    listing: Optional[ModelInfo] = None,
+    selected_paths: Optional[Sequence[str]] = None,
+    model_id: str = "",
+    revision: str = "",
+) -> DownloadScope:
+    """把「清单勾选 + 手填规则」合并成确定的下载范围。
+
+    优先级（写进 README，便于用户预期）：
+
+    1. **有清单且部分勾选** —— 勾选即范围，是最强约束：
+       ``allow_patterns`` 完全由勾选文件生成（逐条转义成精确匹配），手填的
+       「包含规则 / 仅下载子目录」被忽略（日志会明说），避免用户勾了 A 却
+       因为一条 ``*.safetensors`` 规则把同类文件一起拉下来。
+    2. **排除规则永远优先** —— 即使文件被勾选，只要命中「排除规则」就不会
+       下载（与旧版一致的语义），日志会提示该规则仍在生效。
+    3. **有清单且全部勾选** —— 等价于「下载全部」，退回旧行为：手填的包含 /
+       排除 / 子目录规则照常生效（保证老用户「填规则下载」的习惯不变）。
+    4. **未获取清单（或清单与当前模型 / 版本不匹配）** —— 无法按勾选过滤，
+       下载全部文件，但日志必须明确写出「未获取清单，本次下载全部文件」。
+    5. **有清单但一个都没勾选** —— 返回 ``SCOPE_EMPTY``，界面必须中止下载并
+       提示，绝不静默下载整模型。
+
+    Args:
+        allow_raw: 「包含规则」原始文本。
+        ignore_raw: 「排除规则」原始文本。
+        subdir: 「仅下载子目录」原始文本。
+        listing: 当前的文件清单，可为 ``None``。
+        selected_paths: 清单中被勾选的文件路径（Treeview 的 iid，即仓库相对路径）。
+        model_id: 当前输入的模型 ID，用于判断清单是否过期。
+        revision: 当前输入的版本，用于判断清单是否过期。
+
+    Returns:
+        :class:`DownloadScope` 实例（纯函数，无副作用）。
+    """
+    scope = DownloadScope(mode=SCOPE_ALL)
+    rules_allow, rules_ignore = resolve_patterns(allow_raw, ignore_raw, subdir)
+    scope.ignore_patterns = list(rules_ignore)
+
+    usable = _matching_listing(listing, model_id, revision)
+    if usable is None:
+        scope.allow_patterns = list(rules_allow)
+        scope.total_bytes = 0
+        if listing is not None and getattr(listing, "files", None):
+            scope.notes.append(
+                "文件清单属于其它模型 / 版本，已忽略：请重新点【查看文件清单】后再按勾选下载。")
+        scope.notes.append(
+            "未获取清单，本次下载全部文件：勾选过滤只有在【查看文件清单】成功后才生效。")
+        return scope
+
+    listing_paths = [item.path for item in usable.files]
+    sizes = {item.path: item.size for item in usable.files}
+    chosen = _align_selection(selected_paths, listing_paths)
+    scope.total_count = len(listing_paths)
+    scope.selected_count = len(chosen)
+
+    if not chosen:
+        scope.mode = SCOPE_EMPTY
+        scope.allow_patterns = []
+        scope.total_bytes = 0
+        scope.notes.append(
+            "文件清单共 {0} 个文件，当前一个都没勾选。".format(len(listing_paths)))
+        return scope
+
+    if len(chosen) >= len(listing_paths):
+        scope.mode = SCOPE_ALL
+        scope.allow_patterns = list(rules_allow)
+        scope.total_bytes = int(usable.total_size)
+        if rules_allow or rules_ignore:
+            scope.notes.append(
+                "清单已全部勾选：按「下载全部」处理，手填的包含 / 排除 / 子目录规则照常生效。")
+        return scope
+
+    scope.mode = SCOPE_SELECTED
+    scope.allow_patterns = selection_to_allow_patterns(chosen)
+    scope.total_bytes = sum(int(sizes.get(path, 0)) for path in chosen)
+    comma_names = [path for path in chosen if "," in path]
+    if comma_names:
+        # SDK 会把每条规则按逗号切分（normalize_patterns），逗号文件名无法精确
+        # 表达：与其静默漏下，不如在日志里明确告知用户改用其它方式。
+        scope.notes.append(
+            "以下文件名含英文逗号，SDK 的规则语法无法精确表达，可能不会被下载：{0}；"
+            "请改用「包含规则」或勾选全部。".format(", ".join(comma_names)))
+    if rules_allow:
+        scope.notes.append(
+            "勾选优先：本次忽略手填的包含规则 / 子目录（{0}），范围以清单勾选为准。".format(
+                ", ".join(rules_allow)))
+    if rules_ignore:
+        scope.notes.append(
+            "排除规则仍然生效（排除优先）：{0}；命中这些规则的文件即使勾选也不会下载。".format(
+                ", ".join(rules_ignore)))
+    return scope
 
 
 def dir_size_bytes(root: Union[str, Path]) -> int:

@@ -13,6 +13,9 @@
 * ``--smoke-cancel``  —— 用可控 fake SDK 验证「停止 / 取消」能真实中断 SDK
                          下载循环并复位 GUI 状态机，结果写到
                          「取消自检结果.txt / .json」。
+* ``--smoke-select``  —— 验证「文件清单勾选即下载范围」：真实 GUI 里只勾 1
+                         个小文件后真实下载，断言目标文件夹里只有该文件，
+                         结果写到「勾选下载自检结果.txt / .json」。
 
 自检开关是刻意保留在交付 exe 里的：单文件程序脱离 Python 环境后，用户也能
 用一条命令自证「SDK / tkinter / 网络」是否正常，便于排查网络或杀软问题。
@@ -20,13 +23,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import tempfile
 import threading
+import time
 import traceback
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 # 源码模式（非 frozen）下把项目根加入 sys.path，便于直接运行本文件自检；
 # 打包成 exe 后模块已内置，此分支不执行，无副作用。
@@ -526,6 +531,319 @@ def smoke_cancel() -> int:
         checks, ok)
 
 
+class _QuietMessagebox:
+    """自检用弹窗替身：记录内容但不显示，避免模态框卡住无人值守的自检。"""
+
+    def __init__(self) -> None:
+        self.calls: list = []
+
+    def _record(self, kind: str, title: str, message: str) -> str:
+        self.calls.append({"kind": kind, "title": title, "message": message})
+        return "ok"
+
+    def showinfo(self, title: str = "", message: str = "", **kwargs: Any) -> str:
+        return self._record("info", title, message)
+
+    def showerror(self, title: str = "", message: str = "", **kwargs: Any) -> str:
+        return self._record("error", title, message)
+
+    def showwarning(self, title: str = "", message: str = "", **kwargs: Any) -> str:
+        return self._record("warning", title, message)
+
+    def askyesno(self, title: str = "", message: str = "", **kwargs: Any) -> bool:
+        self._record("ask", title, message)
+        return False
+
+
+def _pump(app: Any, root: Any, seconds: float = 0.05) -> None:
+    """驱动界面队列与事件循环（无 mainloop 的自检里等价于定时泵）。"""
+    try:
+        app._drain_ui_queue()
+    except Exception:
+        pass
+    try:
+        root.update()
+    except Exception:
+        pass
+    if seconds:
+        time.sleep(seconds)
+
+
+def _download_running(app: Any) -> bool:
+    """判断当前是否有下载任务在跑（含按钮状态机标记）。"""
+    worker = getattr(app, "_worker", None)
+    if worker is not None and worker.is_alive():
+        return True
+    return bool(getattr(app, "_busy", False))
+
+
+def _wait_worker(app: Any, root: Any, timeout: float) -> float:
+    """等待后台任务结束并排空界面队列，返回耗时秒数。"""
+    started = time.time()
+    while time.time() - started < timeout:
+        _pump(app, root)
+        if not _download_running(app):
+            _pump(app, root, 0.2)
+            return time.time() - started
+    return time.time() - started
+
+
+def _log_text(app: Any) -> str:
+    """读取日志区全文（自检断言直接看用户能看到的内容）。"""
+    try:
+        return app.log_text.get("1.0", "end")
+    except Exception:
+        return ""
+
+
+def _scope_line(text: str, keyword: str) -> str:
+    """从日志全文里挑出包含关键字的最后一行，便于写进报告。"""
+    lines = [line.strip() for line in text.splitlines() if keyword in line]
+    return lines[-1] if lines else "（日志中没有「{}」）".format(keyword)
+
+
+def _target_files(root: Path) -> list:
+    """列出目标文件夹里的所有文件（相对路径，含隐藏文件）。
+
+    隐藏文件 / 目录同样计入：只勾 1 个文件时，SDK 若不听话多下了
+    ``.gitattributes`` 之类的小文件，也必须被这条断言抓出来。
+    """
+    result: list = []
+    for path in sorted(root.rglob("*")):
+        if path.is_file():
+            try:
+                result.append(path.relative_to(root).as_posix())
+            except ValueError:
+                result.append(str(path))
+    return result
+
+
+def smoke_select(target: str = "") -> int:
+    """验证「文件清单勾选即下载范围」端到端真实生效。
+
+    用**真实 GUI**（``gui_app.DownloaderApp`` + 真实 Treeview 勾选）在
+    windowed（无标准句柄）环境里跑完整链路：
+
+    1. 点【查看文件清单】拿到真实清单（``Qwen/Qwen2.5-0.5B-Instruct``）；
+    2. 一个都不勾 → 必须被拦下，不启动下载线程（绝不静默下整模型）；
+    3. 全部勾选 → 等价「下载全部」：``allow_patterns`` 为空、进度分母是整模型
+       大小、日志写「本次下载 M/M 个文件」（此步注入 fake 只抓参数，不联网）；
+    4. 未获取清单 → 下载全部，且日志明确写「未获取清单，本次下载全部文件」；
+    5. 只勾 ``README.md`` → **真实下载**，断言目标文件夹里只有该文件，且进度
+       分母等于勾选文件的字节数（而不是整模型总大小）。
+
+    Args:
+        target: 目标文件夹（下载内容直接落在里面）；为空时用系统临时目录下的
+            ``out`` 子目录。
+
+    Returns:
+        进程退出码（0 表示全部通过）。
+    """
+    checks: list = []
+    logs: list = []
+    model_id = "Qwen/Qwen2.5-0.5B-Instruct"
+    want_file = "README.md"
+
+    if target:
+        dest = Path(target)
+    else:
+        dest = Path(tempfile.mkdtemp(prefix="msdl-select-")) / "out"
+    dest.mkdir(parents=True, exist_ok=True)
+    # 隔离配置目录：自检不读写用户真实的 %APPDATA%/ModelScopeDownloader。
+    config_home = Path(tempfile.mkdtemp(prefix="msdl-select-appdata-"))
+    os.environ["APPDATA"] = str(config_home)
+
+    root = None
+    app = None
+    try:
+        import tkinter as tk
+
+        import gui_app
+        import ms_downloader_core as core
+
+        streams_ok = (sys.stdout is not None and sys.stderr is not None
+                      and getattr(sys, "__stdout__", None) is not None
+                      and getattr(sys, "__stderr__", None) is not None)
+        checks.append((
+            "windowed 标准流安全（无控制台句柄下仍可下载）",
+            streams_ok,
+            "stdout={} | stderr={} | __stdout__={} | 兜底已安装={}".format(
+                type(sys.stdout).__name__, type(sys.stderr).__name__,
+                type(getattr(sys, "__stdout__", None)).__name__,
+                globals().get("_STDIO_GUARD_INSTALLED", False))))
+
+        box = _QuietMessagebox()
+        gui_app.messagebox = box
+        captured: list = []
+
+        def _record_only(**kwargs: Any) -> str:
+            """只记录 GUI 传给 SDK 的参数，不联网。"""
+            captured.append(dict(kwargs))
+            return str(kwargs.get("target_dir", ""))
+
+        root = tk.Tk()
+        root.withdraw()
+        app = gui_app.DownloaderApp(root)
+        app.var_model.set(model_id)
+        app.var_dir.set(str(dest))
+        app.var_revision.set("master")
+        app._drain_ui_queue()
+
+        # ---- 1. 真实清单 ----
+        app.btn_preview.invoke()
+        preview_elapsed = _wait_worker(app, root, 180)
+        info = app._model_info
+        rows = list(app.tree.get_children())
+        info_ok = (info is not None and len(rows) == info.file_count
+                   and want_file in rows)
+        checks.append((
+            "真实文件清单已获取（清单可勾选）",
+            info_ok,
+            "{} 个文件 / Treeview {} 行 / 合计 {} / 耗时 {:.1f}s / 含 {}={}".format(
+                getattr(info, "file_count", 0), len(rows),
+                core.format_size(getattr(info, "total_size", 0)),
+                preview_elapsed, want_file, want_file in rows)))
+        if not info_ok:
+            raise RuntimeError("未取到可勾选的文件清单，后续勾选用例无法验证")
+
+        total_count = info.file_count
+        model_bytes = info.total_size
+        small_bytes = 0
+        for item in info.files:
+            if item.path == want_file:
+                small_bytes = item.size
+        logs.append("清单文件：{}；{}={} 字节".format(
+            [item.path for item in info.files], want_file, small_bytes))
+
+        # ---- 2. 一个都不勾 → 必须被拦下 ----
+        app._select_all(False)
+        app._drain_ui_queue()
+        popups_before = len(box.calls)
+        app.btn_download.invoke()
+        _pump(app, root, 0.3)
+        blocked = (not _download_running(app) and len(box.calls) > popups_before
+                   and "勾选" in str(box.calls[-1]["message"]))
+        checks.append((
+            "全不选 + 开始下载 = 明确拦下（不静默下载整模型）",
+            blocked,
+            "是否启动下载={} | 弹窗标题={} | 提示含「勾选」={}".format(
+                _download_running(app),
+                box.calls[-1]["title"] if len(box.calls) > popups_before else "（无）",
+                "勾选" in str(box.calls[-1]["message"]) if box.calls else False)))
+
+        original_download = core.download_model
+        # ---- 3. 全部勾选 = 下载全部 ----
+        app._select_all(True)
+        app._drain_ui_queue()
+        try:
+            core.download_model = _record_only
+            captured.clear()
+            app.btn_download.invoke()
+            _wait_worker(app, root, 60)
+        finally:
+            core.download_model = original_download
+        all_allow = captured[0].get("allow_patterns") if captured else None
+        all_total = captured[0].get("total_bytes") if captured else -1
+        all_text = _log_text(app)
+        checks.append((
+            "全部勾选 = 下载全部（allow_patterns 为空 + 日志写 M/M）",
+            all_allow == [] and all_total == model_bytes
+            and "本次下载 {0}/{0} 个文件".format(total_count) in all_text,
+            "allow_patterns={} | 进度分母={}（整模型 {}）| {}".format(
+                all_allow, all_total, model_bytes,
+                _scope_line(all_text, "本次下载"))))
+
+        # ---- 4. 未获取清单 → 下载全部，但日志必须写明 ----
+        saved_info = app._model_info
+        app._model_info = None
+        for iid in app.tree.get_children():
+            app.tree.delete(iid)
+        app._drain_ui_queue()
+        try:
+            core.download_model = _record_only
+            captured.clear()
+            app.btn_download.invoke()
+            _wait_worker(app, root, 60)
+        finally:
+            core.download_model = original_download
+        none_allow = captured[0].get("allow_patterns") if captured else None
+        none_text = _log_text(app)
+        checks.append((
+            "未获取清单时下载全部且日志明确写出",
+            none_allow == [] and "未获取清单，本次下载全部文件" in none_text,
+            "allow_patterns={} | {}".format(
+                none_allow, _scope_line(none_text, "未获取清单"))))
+
+        # ---- 5. 只勾 1 个文件 → 真实下载，断言目录里只有它 ----
+        app._show_model_info(saved_info)
+        app._select_all(False)
+        app._toggle_row(want_file)
+        app._drain_ui_queue()
+        checked = app._selected_paths()
+        totals: list = []
+        original_progress = app._on_progress
+
+        def _spy_progress(done: int, total: int, message: str = "") -> None:
+            totals.append(int(total or 0))
+            return original_progress(done, total, message)
+
+        app._on_progress = _spy_progress
+        try:
+            app.btn_download.invoke()
+            download_elapsed = _wait_worker(app, root, 300)
+        finally:
+            app._on_progress = original_progress
+        sel_text = _log_text(app)
+        files = _target_files(dest)
+        nonzero_totals = sorted({value for value in totals if value})
+        checks.append((
+            "只勾 1 个文件 → 目标文件夹里只有该文件",
+            files == [want_file] and checked == [want_file],
+            "勾选={} | 目标文件夹={} | 耗时 {:.1f}s".format(
+                checked, files, download_elapsed)))
+        checks.append((
+            "进度分母 = 勾选文件字节数（而非整模型总大小）",
+            bool(nonzero_totals) and nonzero_totals == [small_bytes],
+            "进度分母取值={} | {}={} 字节 | 整模型={} 字节".format(
+                nonzero_totals, want_file, small_bytes, model_bytes)))
+        checks.append((
+            "日志写明本次下载范围（N/M 个文件 + 合计）",
+            "本次下载 1/{} 个文件".format(total_count) in sel_text,
+            _scope_line(sel_text, "本次下载")))
+        logs.append("单文件下载日志尾部：" + " / ".join(
+            [line.strip() for line in sel_text.splitlines() if line.strip()][-4:]))
+    except Exception as exc:  # noqa: BLE001 - 自检要让每一项都跑完
+        checks.append((
+            "勾选下载链路执行", False,
+            "{}: {}\n{}".format(type(exc).__name__, exc,
+                                traceback.format_exc(limit=6))))
+    finally:
+        if app is not None and root is not None:
+            try:
+                _pump(app, root, 0)
+            except Exception:
+                pass
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
+        # 自检产生的临时配置目录顺手清掉，避免反复自检在 %TEMP% 里留垃圾。
+        try:
+            import shutil
+
+            shutil.rmtree(str(config_home), ignore_errors=True)
+        except Exception:
+            pass
+
+    ok = all(item[1] for item in checks)
+    checks.append(("自检补充信息", True, "\n".join(logs) or "（无）"))
+    return _write_report(
+        "勾选下载自检结果.txt",
+        "ModelScope 下载器 · 文件清单勾选即下载范围（含 1 次真实小文件下载）",
+        checks, ok)
+
+
 def main() -> int:
     args = sys.argv[1:]
     if args and args[0] == "--self-check":
@@ -536,6 +854,8 @@ def main() -> int:
         return smoke_progress(args[1] if len(args) > 1 else "")
     if args and args[0] == "--smoke-cancel":
         return smoke_cancel()
+    if args and args[0] == "--smoke-select":
+        return smoke_select(args[1] if len(args) > 1 else "")
     if args and args[0] in ("--version", "-V"):
         import modelscope
         print("ModelScope 下载器 · 单文件版 | Python {} | modelscope {}".format(

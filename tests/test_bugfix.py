@@ -141,6 +141,7 @@ def _spawn_no_handles(application, args, cwd, timeout_ms=240000):
         return {"returncode": None, "timed_out": False,
                 "error": "CreateProcessW 失败 err={}".format(ctypes.get_last_error())}
     WAIT_OBJECT_0, WAIT_TIMEOUT = 0, 0x102
+    _record_spawn(pi.dwProcessId, application)  # 登记 PID：残留判据之一
     rc = wait(pi.hProcess, timeout_ms)
     timed_out = rc == WAIT_TIMEOUT
     if timed_out:
@@ -300,24 +301,29 @@ def _skip_if_no_heavy_toolchain(case):
 class TestSnapshotAndStatic(unittest.TestCase):
     """核对磁盘实物、语法、依赖方向、bat 编码。"""
 
-    # 2026-11-08 22:xx 主理人下发的最新基线。README 因补一行文件清单说明
-    # 由 190→217 行、md5 变更；其余交付源码 / exe 全程未变、未重新打包。
-    # 文档若再次更新，请同步刷新此表（这正是快照一致性检查的目的）。
+    # 2026-11-11 14:5x QA（严过关）独立回归基线，对应「文件清单勾选未生效」修复：
+    # core / gui / entry.py / exe / README / 使用说明 全部变更并重新打包，
+    # 新增 pack/verify_select.py 与 pack/repro_select_bug.py 两个交付脚本。
+    # 实测值一律来自磁盘实物（md5sum / wc -l / stat），不是抄工程师的声明；
+    # 交付文档若再次更新，请同步刷新此表（这正是快照一致性检查的目的）。
     EXPECTED_MD5 = {
-        "ms_downloader_core.py": "aa5bac134bd73a4fcd8f416018c8973b",
-        "gui_app.py": "00d4b3c165f714e924eed5a54a7ce5ba",
-        "pack/entry.py": "783b16d9a01bd24e0b644f37a9adeb4f",
-        "dist/ModelScope下载器.exe": "f90efbd0cb9479e03230014c1688b7c5",
-        "README.md": "10da963c66eddf1d5d96b3f64f2836fd",
-        "dist/使用说明.txt": "c59fb76f3d1b8d6e7c39414412c59c85",
-        "pack/repro_smoke_exact.py": "650becfbee5ba036a5ff587f21a404f6",
+        "ms_downloader_core.py": "06092430e1f8a1372ae0821f792f66d5",
+        "gui_app.py": "b3c4131338105f69943b14bf7733bed3",
+        "pack/entry.py": "294071d8709e4d61646fb0299f257778",
+        "dist/ModelScope下载器.exe": "8295e555c92cce8a5becdd25529c5e37",
+        "README.md": "ea135822f2c270aacf4ba41b5e172c6a",
+        "dist/使用说明.txt": "a2c225e705cdc1fb64673f6a6208df5c",
+        "pack/verify_select.py": "efbc0c4a2f753a765826e9c7598aa69c",
+        "pack/repro_select_bug.py": "3dddd3599d47ff94c85e55e6ec86280f",
     }
     EXPECTED_LINES = {
-        "ms_downloader_core.py": 1755,
-        "gui_app.py": 972,
-        "pack/entry.py": 560,
-        "README.md": 217,
-        "pack/repro_smoke_exact.py": 96,
+        "ms_downloader_core.py": 2033,
+        "gui_app.py": 1037,
+        "pack/entry.py": 880,
+        "README.md": 259,
+        "dist/使用说明.txt": 160,
+        "pack/verify_select.py": 252,
+        "pack/repro_select_bug.py": 178,
     }
 
     @staticmethod
@@ -347,7 +353,7 @@ class TestSnapshotAndStatic(unittest.TestCase):
 
     def test_a03_exe_size_is_reasonable(self):
         size = EXE.stat().st_size
-        self.assertEqual(size, 34272805)
+        self.assertEqual(size, 34288975)
         self.assertTrue(20 * 1024 * 1024 < size < 60 * 1024 * 1024)
 
     def test_a04_all_python_and_spec_compile(self):
@@ -1078,18 +1084,18 @@ class TestDeliveryConsistency(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         manual = (ROOT / "dist" / "使用说明.txt").read_text(encoding="utf-8")
         for switch in ("--self-check", "--smoke-download",
-                       "--smoke-progress", "--smoke-cancel"):
+                       "--smoke-progress", "--smoke-cancel", "--smoke-select"):
             with self.subTest(switch=switch):
                 self.assertIn(switch, readme, "README 未说明 {}".format(switch))
                 self.assertIn(switch, manual, "使用说明未说明 {}".format(switch))
-        for keyword in ("取消", "停止", "windowed", "标准流"):
+        for keyword in ("取消", "停止", "windowed", "标准流", "勾选", "下载范围"):
             with self.subTest(keyword=keyword):
                 self.assertIn(keyword, manual)
 
     def test_e02_entry_main_exposes_all_four_switches(self):
         text = (ROOT / "pack" / "entry.py").read_text(encoding="utf-8")
         for switch in ("--self-check", "--smoke-download",
-                       "--smoke-progress", "--smoke-cancel"):
+                       "--smoke-progress", "--smoke-cancel", "--smoke-select"):
             self.assertIn('"{}"'.format(switch), text)
         self.assertIn("_install_stdio_guard()", text)
         # guard 必须是模块级、早于任何第三方导入
@@ -1098,20 +1104,264 @@ class TestDeliveryConsistency(unittest.TestCase):
         self.assertLess(idx_guard, idx_sdk_import,
                         "stdio guard 的模块级调用未早于 modelscope 导入")
 
+    def test_e02b_selection_delivery_scripts_are_present(self):
+        """「勾选即范围」的两份交付脚本必须真的在磁盘上、且被文档索引。"""
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        for rel in ("pack/verify_select.py", "pack/repro_select_bug.py"):
+            with self.subTest(file=rel):
+                self.assertTrue((ROOT / rel).is_file(), "缺少交付脚本 {}".format(rel))
+                self.assertIn(rel, readme, "README 未索引 {}".format(rel))
+        for rel in ("pack/repro_select_bug_before.json",
+                    "pack/repro_select_bug_after.json"):
+            with self.subTest(file=rel):
+                self.assertTrue((ROOT / rel).is_file(), "缺少 A/B 证据 {}".format(rel))
+
     def test_e03_no_residual_exe_process(self):
-        """验证结束后不允许残留 ModelScope下载器.exe 进程。"""
+        """只判「本次验证启动的 exe 进程」有无残留，绝不误伤用户手动实例。
+
+        历史缺陷（ROUTE: QA 已修）：旧实现断言全局进程表里不存在任何
+        ``ModelScope*下载器.exe``，无法区分「用户自己双击打开的实例」与
+        「验证残留」——用户开着程序做别的事时该用例必然误红，而为了让红转绿
+        的唯一捷径就是去杀用户进程，方向完全错误。
+
+        现实现是**双重判据**，任一命中才算残留：
+          1. **PID 归属**：本模块通过 ``CreateProcessW`` 启动过并且记录下来的
+             PID（``SPAWNED``）仍在运行；
+          2. **路径归属**：进程的可执行文件路径落在系统临时目录或本仓库内
+             （覆盖 PyInstaller onefile 派生出的、我们没有拿到 PID 的子进程）。
+        反之：
+          * 路径落在别处（如 ``D:\\Program Files\\自建软件\\``）→ 判定为用户
+            手动实例 → 只记录，不判红、不判跳过、绝不动它；
+          * 打不开句柄（权限不足）→ 无法归属 → 只记录，不妄下结论。
+        另注：本用例在类执行序里跑得早，exe 驱动的残留由 ``tearDownModule``
+        在整个模块跑完后再复核一次，避免"检查早于残留产生"的漏网。
+        """
         if not IS_WIN:
             self.skipTest("仅 Windows 检查进程")
+        mine, foreign, unknown = _classify_exe_processes()
+        self.assertEqual(
+            mine, [],
+            "本次验证启动的 exe 进程残留未退出：{}".format(mine))
+        if foreign or unknown:
+            # 用户在用的实例：只记录，不判红、不动它（判跳过会让「已验证」失真，
+            # 所以这里选择通过 + 备注，由 QA 报告如实呈现）。
+            EXE_PROCESS_NOTES.append(
+                "非验证来源的实例（已忽略，未做任何操作）：{} / 无法读取路径的 PID {}".format(
+                    foreign, unknown))
+
+    def test_e04_dist_directory_has_no_self_check_leftovers(self):
+        """自检报告必须写在 exe 所在目录，dist/ 只能有 exe + 使用说明。"""
+        names = sorted(p.name for p in (ROOT / "dist").iterdir())
+        for leftover in names:
+            with self.subTest(name=leftover):
+                self.assertNotIn("自检结果", leftover,
+                                 "dist/ 出现了自检产物：{}".format(leftover))
+                self.assertFalse(leftover.endswith(".log"),
+                                 "dist/ 出现了日志：{}".format(leftover))
+
+    def test_e05_residual_judge_really_tells_user_instance_apart(self):
+        """用注入的进程表证明判据能区分「用户实例」与「验证残留」。
+
+        这条用例是 ``test_e03`` 的**逻辑自证**：不依赖机器上真的有没有进程，
+        因此无论用户是否开着程序，都能证明判据本身是对的。
+        """
+        always_alive = lambda _pid: True  # noqa: E731 - 注入用
+        temp_copy = str(Path(tempfile.gettempdir()) / "qa-fake" / "ModelScope下载器.exe")
+        user_copy = r"D:\Program Files\自建软件\ModelScope 下载器.exe"
+        repo_copy = str(ROOT / "dist" / "ModelScope下载器.exe")
+
+        # 1) 只有用户实例（哪怕文件名带空格、路径在 D:）→ 不算残留
+        mine, foreign, unknown = _classify_exe_processes(
+            listing=[(4101, user_copy)], alive=always_alive, spawned=[])
+        self.assertEqual(mine, [], "用户手动实例绝不能判成验证残留")
+        self.assertEqual([pid for pid, _ in foreign], [4101])
+        self.assertEqual(unknown, [])
+
+        # 2) 临时目录里的副本 → 判为残留（等价于本次验证启动的 exe 没退出）
+        mine, foreign, _ = _classify_exe_processes(
+            listing=[(4102, temp_copy)], alive=always_alive, spawned=[])
+        self.assertEqual([pid for pid, _ in mine], [4102])
+        self.assertEqual(foreign, [])
+
+        # 3) 仓库内（dist/ 被直接驱动）→ 也判为残留
+        mine, _, _ = _classify_exe_processes(
+            listing=[(4103, repo_copy)], alive=always_alive, spawned=[])
+        self.assertEqual([pid for pid, _ in mine], [4103])
+
+        # 4) 已退出的进程（alive=False）→ 一律不判残留
+        mine, foreign, _ = _classify_exe_processes(
+            listing=[(4104, temp_copy)], alive=lambda _pid: False, spawned=[])
+        self.assertEqual((mine, foreign), ([], []))
+
+        # 5) 拿不到路径（权限不足）→ 只能归为 unknown，不能猜着判红
+        mine, _, unknown = _classify_exe_processes(
+            listing=[(4105, None)], alive=always_alive, spawned=[])
+        self.assertEqual((mine, unknown), ([], [4105]))
+
+        # 6) 跨盘安全：D: 与 C: 之间不会误判为「在树下」
+        self.assertFalse(_is_under(Path(user_copy), Path("C:/Users")))
+        self.assertTrue(_is_under(Path(user_copy), Path(r"D:\Program Files")))
+
+
+def _is_under(path: Path, parent: Path) -> bool:
+    """``path`` 是否位于 ``parent`` 目录树下（大小写不敏感，跨盘安全）。"""
+    try:
+        path.relative_to(parent.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+#: 非验证来源（用户手动打开）的 exe 实例记录，供 QA 报告如实呈现。
+EXE_PROCESS_NOTES: list = []
+
+#: 本模块通过 CreateProcessW 启动过、并记录下来的 (pid, 可执行文件路径)。
+SPAWNED: list = []
+
+
+def _record_spawn(pid, application) -> None:
+    """登记本次验证亲手启动的进程，作为「残留」的 PID 判据。"""
+    if pid:
+        SPAWNED.append((int(pid), str(application)))
+
+
+def _pid_alive(pid, timeout_ms=2500) -> bool:
+    """``pid`` 是否仍在运行（先给它 ``timeout_ms`` 的退出宽限期）。"""
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    open_process = k32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = ctypes.c_void_p
+    wait = k32.WaitForSingleObject
+    wait.argtypes = [ctypes.c_void_p, wintypes.DWORD]
+    wait.restype = wintypes.DWORD
+    close = k32.CloseHandle
+    close.argtypes = [ctypes.c_void_p]
+
+    SYNCHRONIZE = 0x00100000
+    handle = open_process(SYNCHRONIZE, False, int(pid))
+    if not handle:
+        return False  # 打不开基本等于已退出（或无权访问，此时也不该判红）
+    try:
+        return wait(handle, timeout_ms) != 0  # 非 WAIT_OBJECT_0 → 仍存活
+    finally:
+        close(handle)
+
+
+def _classify_exe_processes(settle_ms=2500, listing=None, alive=None, spawned=None):
+    """把当前 exe 进程分成「验证残留 / 用户实例 / 无法归属」三类。
+
+    Args:
+        settle_ms: 判定前给进程的退出宽限期（毫秒）。
+        listing: 便于单测注入的进程列表；``None`` 时真实枚举。
+        alive: 便于单测注入的「是否存活」判定；``None`` 时按 PID 真实探测。
+        spawned: 便于单测注入的「本次启动过的 PID」；``None`` 时用 ``SPAWNED``。
+
+    Returns:
+        ``(mine, foreign, unknown)``；``mine`` 为空表示没有残留。
+        进程枚举不可用时返回 ``(None, None, None)``。
+    """
+    listing = _list_exe_processes() if listing is None else listing
+    if listing is None:
+        return None, None, None
+    alive = alive or (lambda pid: _pid_alive(pid, settle_ms))
+    spawned = SPAWNED if spawned is None else spawned
+    tmp_root = Path(tempfile.gettempdir())
+    mine, foreign, unknown = [], [], []
+    for pid, image in listing:
+        if not image:
+            unknown.append(pid)
+            continue
+        resolved = Path(image)
+        if _is_under(resolved, tmp_root) or _is_under(resolved, ROOT):
+            if alive(pid):
+                mine.append((pid, str(resolved)))
+        else:
+            foreign.append((pid, str(resolved)))
+    # PID 判据：自己启动过的进程即便路径判定不出来，活着也算残留。
+    known = {item[0] for item in mine}
+    for pid, application in spawned:
+        if pid in known:
+            continue
+        if alive(pid):
+            mine.append((pid, "{}（本模块 CreateProcessW 启动）".format(application)))
+    return mine, foreign, unknown
+
+
+def tearDownModule():
+    """test_bugfix 全部用例（含 4 次 exe 驱动）跑完后复核一次残留。
+
+    为什么放在这里：``test_e03`` 在类执行序里靠前，跑它的时候 exe 驱动还没
+    开始，无法发现"之后才产生"的残留（PyInstaller onefile 的 bootloader 与
+    解压出的子进程尤其容易漏）。模块级收尾能覆盖整段执行过程。
+    """
+    if not IS_WIN or not EXE.is_file():
+        return
+    mine, foreign, unknown = _classify_exe_processes()
+    if mine is None:
+        return
+    if foreign or unknown:
+        EXE_PROCESS_NOTES.append(
+            "tearDownModule 观察到非验证来源的实例（已忽略，未做任何操作）："
+            "{} / 无法读取路径的 PID {}".format(foreign, unknown))
+    if mine:
+        raise AssertionError(
+            "test_bugfix 的 exe 驱动留下了残留进程（未做任何清理动作，"
+            "仅如实报红）：{}".format(mine))
+
+
+def _list_exe_processes():
+    """枚举进程并解析可执行文件路径，只返回名字含 ``ModelScope`` 的 exe。
+
+    Returns:
+        ``[(pid, image_path_or_None), ...]``；枚举本身不可用时返回 ``None``。
+    """
+    from ctypes import wintypes
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+
+    enum = psapi.EnumProcesses
+    enum.argtypes = [ctypes.POINTER(wintypes.DWORD), wintypes.DWORD,
+                     ctypes.POINTER(wintypes.DWORD)]
+    enum.restype = wintypes.BOOL
+    open_process = k32.OpenProcess
+    open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    open_process.restype = ctypes.c_void_p
+    query = k32.QueryFullProcessImageNameW
+    query.argtypes = [ctypes.c_void_p, wintypes.DWORD,
+                      wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+    query.restype = wintypes.BOOL
+    close = k32.CloseHandle
+    close.argtypes = [ctypes.c_void_p]
+
+    capacity = 8192
+    buffer = (wintypes.DWORD * capacity)()
+    needed = wintypes.DWORD()
+    if not enum(buffer, ctypes.sizeof(buffer), ctypes.byref(needed)):
+        return None
+    count = needed.value // ctypes.sizeof(wintypes.DWORD)
+    result = []
+    PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+    for index in range(count):
+        pid = buffer[index]
+        if not pid:
+            continue
+        handle = open_process(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            continue
         try:
-            proc = subprocess.run(
-                ["tasklist", "/FO", "CSV", "/NH"],
-                capture_output=True, timeout=30)
-            text = proc.stdout.decode("mbcs", errors="replace")
-        except Exception as exc:
-            self.skipTest("tasklist 不可用：{}".format(exc))
-        hits = [line for line in text.splitlines()
-                if "ModelScope" in line and ".exe" in line]
-        self.assertEqual(hits, [], "存在残留 exe 进程：{}".format(hits))
+            path_buf = ctypes.create_unicode_buffer(2048)
+            size = wintypes.DWORD(2048)
+            image = (path_buf.value
+                     if query(handle, 0, path_buf, ctypes.byref(size)) else "")
+        finally:
+            close(handle)
+        name = Path(image).name if image else ""
+        if "ModelScope" in name and name.lower().endswith(".exe"):
+            result.append((pid, image or None))
+    return result
 
 
 if __name__ == "__main__":
